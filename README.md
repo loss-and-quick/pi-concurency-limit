@@ -1,17 +1,23 @@
 # pi-concurency-limit
 
-Pi extension that enforces per-model **in-process** concurrency limits.
+Pi extension that enforces per-model **cross-process** concurrency limits.
 
 It queues provider requests by concrete model key:
 
 - `provider/model`
 - example: `anthropic/claude-sonnet-4`
 
-## Important limitation
+## Scope
 
-This implementation is **process-local only**.
+This implementation is **cross-process on the local machine**.
 
-Pi subagents may run in separate OS processes, so this package does **not** provide a global cross-process concurrency cap. It only coordinates requests inside the current Pi process.
+It uses a shared SQLite database at:
+
+- `~/.pi/agent/state/concurrency-limit.db`
+
+That means separate Pi processes on the same machine coordinate through shared leases and a FIFO waiter queue.
+
+It is still **not distributed** across multiple machines or containers that do not share the same filesystem.
 
 ## Install / use
 
@@ -89,9 +95,12 @@ When a configured error status is seen, the extension also emits a UI warning no
 ## Behavior
 
 - acquires a slot in `before_provider_request`
+- stores shared waiters and leases in SQLite
 - releases the slot on `message_end` for assistant messages
 - uses `agent_end` and `session_shutdown` as safety-net releases
 - uses FIFO queueing through `src/limiter.ts`
+- refreshes lease heartbeats while a request is in flight
+- prunes stale waiters/leases from dead or expired processes
 - never injects custom concurrency fields into provider payloads
 - does not read any separate extension JSON config file or env dict
 

@@ -1,15 +1,25 @@
 {
   "name": "pi-concurency-limit",
   "version": "0.1.0",
-  "description": "Pi extension that enforces per-model in-process concurrency limits.",
+  "description": "Pi extension that enforces per-model cross-process concurrency limits via SQLite.",
   "type": "module",
-  "keywords": ["pi-package", "pi", "extension", "concurrency", "rate-limit"],
-  "files": ["src", "README.md"],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "concurrency",
+    "rate-limit"
+  ],
+  "files": [
+    "src",
+    "README.md"
+  ],
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "*",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.3.0",
     "typescript": "^5.9.2"
   },
@@ -20,6 +30,11 @@
     "typecheck": "tsc --noEmit"
   },
   "pi": {
-    "extensions": ["./src/index.ts"]
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0"
   }
 }

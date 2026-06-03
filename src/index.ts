@@ -24,8 +24,10 @@ type LimitConfig = {
 
 type Pending = {
 	key: string;
+	limit: number;
+	leaseOwnerId: string;
 	acquiredAt: number;
-	release: () => void;
+	release: () => Promise<void>;
 	status?: number;
 	configuredErrorStatus?: boolean;
 };
@@ -43,7 +45,6 @@ function log(message: string): void {
 	if (LOG_ENABLED) console.warn(`[pi-concurrency-limit] ${ts()} ${message}`);
 }
 
-/** Coerce an arbitrary value into a positive finite integer, or undefined. */
 function toLimit(raw: unknown, source: string): number | undefined {
 	if (raw === undefined || raw === null) return undefined;
 	const num = typeof raw === "number" ? raw : Number(raw);
@@ -140,6 +141,7 @@ export default function (pi: ExtensionAPI): void {
 		{ mtimeMs: number; config: LimitConfig | undefined }
 	>();
 	const notifyState = new Map<string, { lastAt: number; suppressed: number }>();
+	let requestCounter = 0;
 
 	function readScopedConfig(path: string): LimitConfig | undefined {
 		let mtimeMs: number;
@@ -262,6 +264,11 @@ export default function (pi: ExtensionAPI): void {
 		return ctx.sessionManager.getSessionFile() ?? "ephemeral-session";
 	}
 
+	function nextLeaseOwnerId(owner: string): string {
+		requestCounter += 1;
+		return `${process.pid}:${Date.now()}:${requestCounter}:${owner}`;
+	}
+
 	function classifyRelease(pending: Pending, reason: string): string {
 		if (pending.status === undefined) return `${reason}:no-response`;
 		if (pending.configuredErrorStatus) {
@@ -272,29 +279,26 @@ export default function (pi: ExtensionAPI): void {
 		return `${reason}:status:${pending.status}`;
 	}
 
-	function releaseForOwner(owner: string, reason: string): void {
+	async function releaseForOwner(owner: string, reason: string): Promise<void> {
 		const held = pendingByOwner.get(owner);
 		if (!held) return;
 		pendingByOwner.delete(owner);
 		const classifiedReason = classifyRelease(held, reason);
 		const heldMs = Date.now() - held.acquiredAt;
-		held.release();
-		const after = limiter.stats(held.key);
+		await held.release();
+		const after = await limiter.stats(held.key, held.limit);
 		log(
 			`release  owner=${owner} key=${held.key} heldMs=${heldMs} reason=${classifiedReason}` +
-				(after
-					? ` -> active=${after.active}/${after.limit} queued=${after.queued}`
-					: ""),
+				` -> active=${after.active}/${after.limit} queued=${after.queued}`,
 		);
 	}
 
-	function releaseAll(reason: string): void {
-		for (const owner of [...pendingByOwner.keys()])
-			releaseForOwner(owner, reason);
+	async function releaseAll(reason: string): Promise<void> {
+		for (const owner of [...pendingByOwner.keys()]) {
+			await releaseForOwner(owner, reason);
+		}
 	}
 
-	// Acquire a slot before the provider request goes out. We never modify the
-	// payload, so no custom field can leak to the provider.
 	pi.on("before_provider_request", async (_event, ctx) => {
 		const ids = modelKey(ctx);
 		if (!ids) return;
@@ -304,30 +308,38 @@ export default function (pi: ExtensionAPI): void {
 		const limit = resolveLimit(ctx, key, provider);
 		if (limit === undefined) return;
 
-		// Defensive: a previous turn's release event might not have arrived yet.
-		releaseForOwner(owner, "defensive-before-acquire");
+		await releaseForOwner(owner, "defensive-before-acquire");
 
-		const before = limiter.stats(key);
-		const willWait = before ? before.active >= limit : false;
+		const leaseOwnerId = nextLeaseOwnerId(owner);
+		const before = await limiter.stats(key, limit, leaseOwnerId);
+		const willWait = before.active >= limit || before.queued > 0;
 		log(
 			`request  owner=${owner} key=${key} limit=${limit}` +
-				(before
-					? ` active=${before.active}/${before.limit} queued=${before.queued}`
-					: "") +
+				` active=${before.active}/${before.limit} queued=${before.queued}` +
 				(willWait ? " -> WAITING" : " -> immediate"),
 		);
 
 		const t0 = Date.now();
-		const release = await limiter.acquire(key, limit);
+		const release = await limiter.acquire(
+			key,
+			limit,
+			leaseOwnerId,
+			owner,
+			ctx.signal,
+		);
 		const waitMs = Date.now() - t0;
-		pendingByOwner.set(owner, { key, acquiredAt: Date.now(), release });
+		pendingByOwner.set(owner, {
+			key,
+			limit,
+			leaseOwnerId,
+			acquiredAt: Date.now(),
+			release,
+		});
 
-		const after = limiter.stats(key);
+		const after = await limiter.stats(key, limit, leaseOwnerId);
 		log(
 			`acquired owner=${owner} key=${key} waitMs=${waitMs}` +
-				(after
-					? ` active=${after.active}/${after.limit} queued=${after.queued}`
-					: ""),
+				` active=${after.active}/${after.limit} queued=${after.queued}`,
 		);
 	});
 
@@ -347,18 +359,16 @@ export default function (pi: ExtensionAPI): void {
 		}
 	});
 
-	// Release when the assistant message that this request produced is finalized.
-	pi.on("message_end", (event, ctx) => {
+	pi.on("message_end", async (event, ctx) => {
 		if (event.message.role !== "assistant") return;
-		releaseForOwner(ownerKey(ctx), "message_end");
+		await releaseForOwner(ownerKey(ctx), "message_end");
 	});
 
-	// Safety nets: make sure nothing stays held after a prompt or the session ends.
-	pi.on("agent_end", () => {
-		releaseAll("agent_end");
+	pi.on("agent_end", async () => {
+		await releaseAll("agent_end");
 	});
 
-	pi.on("session_shutdown", (event) => {
-		releaseAll(`session_shutdown:${event.reason}`);
+	pi.on("session_shutdown", async (event) => {
+		await releaseAll(`session_shutdown:${event.reason}`);
 	});
 }
