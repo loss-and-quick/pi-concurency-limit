@@ -1,8 +1,7 @@
-import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
-import Database from "better-sqlite3";
+import { type DbAdapter } from "./db-adapter.js";
 
 export type Release = () => Promise<void>;
 
@@ -19,7 +18,7 @@ type EntryRow = {
 	heartbeatAt: number;
 };
 
-const DEFAULT_DB_PATH = join(
+export const DEFAULT_DB_PATH = join(
 	homedir(),
 	".pi",
 	"agent",
@@ -68,39 +67,10 @@ async function delay(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 export class Limiter {
-	private readonly db: Database.Database;
+	private readonly db: DbAdapter;
 
-	constructor(dbPath = DEFAULT_DB_PATH) {
-		mkdirSync(dirname(dbPath), { recursive: true });
-		this.db = new Database(dbPath);
-		this.db.pragma("journal_mode = WAL");
-		this.db.pragma("synchronous = NORMAL");
-		this.db.pragma("busy_timeout = 5000");
-		this.db.exec(`
-			CREATE TABLE IF NOT EXISTS waiters (
-				key TEXT NOT NULL,
-				owner_id TEXT PRIMARY KEY,
-				session_owner TEXT NOT NULL,
-				pid INTEGER NOT NULL,
-				enqueued_at INTEGER NOT NULL,
-				heartbeat_at INTEGER NOT NULL
-			);
-
-			CREATE TABLE IF NOT EXISTS leases (
-				key TEXT NOT NULL,
-				owner_id TEXT PRIMARY KEY,
-				session_owner TEXT NOT NULL,
-				pid INTEGER NOT NULL,
-				acquired_at INTEGER NOT NULL,
-				heartbeat_at INTEGER NOT NULL
-			);
-
-			CREATE INDEX IF NOT EXISTS waiters_key_order_idx
-			ON waiters (key, enqueued_at, owner_id);
-
-			CREATE INDEX IF NOT EXISTS leases_key_idx
-			ON leases (key);
-		`);
+	constructor(db: DbAdapter) {
+		this.db = db;
 	}
 
 	async acquire(
@@ -208,13 +178,13 @@ export class Limiter {
 			}
 
 			const ordered = this.db
-				.prepare(
+				.prepare<{ ownerId: string }>(
 					`SELECT owner_id AS ownerId
 						 FROM waiters
 						 WHERE key = ?
 						 ORDER BY enqueued_at ASC, owner_id ASC`,
 				)
-				.all(args.key) as Array<{ ownerId: string }>;
+				.all(args.key);
 			const position =
 				ordered.findIndex((entry) => entry.ownerId === args.ownerId) + 1;
 			const active = this.countRows("leases", args.key);
@@ -257,13 +227,13 @@ export class Limiter {
 			let position: number | undefined;
 			if (ownerId) {
 				const ordered = this.db
-					.prepare(
+					.prepare<{ ownerId: string }>(
 						`SELECT owner_id AS ownerId
 						 FROM waiters
 						 WHERE key = ?
 						 ORDER BY enqueued_at ASC, owner_id ASC`,
 					)
-					.all(key) as Array<{ ownerId: string }>;
+					.all(key);
 				const found = ordered.findIndex((entry) => entry.ownerId === ownerId);
 				position = found >= 0 ? found + 1 : undefined;
 			}
@@ -301,12 +271,12 @@ export class Limiter {
 		now: number,
 	): void {
 		const rows = this.db
-			.prepare(
+			.prepare<EntryRow>(
 				`SELECT owner_id AS ownerId, pid, heartbeat_at AS heartbeatAt
 				 FROM ${table}
 				 WHERE key = ?`,
 			)
-			.all(key) as EntryRow[];
+			.all(key);
 		const deleteRow = this.db.prepare(
 			`DELETE FROM ${table} WHERE owner_id = ?`,
 		);
@@ -323,8 +293,8 @@ export class Limiter {
 
 	private countRows(table: "waiters" | "leases", key: string): number {
 		const row = this.db
-			.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE key = ?`)
-			.get(key) as { count: number };
-		return row.count;
+			.prepare<{ count: number }>(`SELECT COUNT(*) AS count FROM ${table} WHERE key = ?`)
+			.get(key);
+		return row?.count ?? 0;
 	}
 }

@@ -7,7 +7,9 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 
-import { Limiter } from "./limiter.js";
+import { openBetterSqlite3 } from "./adapters/better-sqlite3.js";
+import { openBunSqlite } from "./adapters/bun-sqlite.js";
+import { DEFAULT_DB_PATH, Limiter } from "./limiter.js";
 
 const SETTINGS_KEY = "concurrencyLimits";
 const DEFAULT_ERROR_STATUS_CODES = [429];
@@ -133,8 +135,21 @@ function parseSettingsConfig(
 	}
 }
 
+function isBunRuntime(): boolean {
+	const versions = process.versions as NodeJS.ProcessVersions & {
+		bun?: string;
+	};
+	return typeof versions.bun === "string";
+}
+
+function openLimiterDb() {
+	return isBunRuntime()
+		? openBunSqlite(DEFAULT_DB_PATH)
+		: openBetterSqlite3(DEFAULT_DB_PATH);
+}
+
 export default function (pi: ExtensionAPI): void {
-	const limiter = new Limiter();
+	const limiter = new Limiter(openLimiterDb());
 	const pendingByOwner = new Map<string, Pending>();
 	const settingsCache = new Map<
 		string,

@@ -29,11 +29,20 @@ pi-concurency-limit/
 ├── package-lock.json
 ├── node_modules/
 └── src/
+    ├── adapters/
+    │   ├── better-sqlite3.ts
+    │   └── bun-sqlite.ts
+    ├── db-adapter.ts
     ├── index.ts
     └── limiter.ts
 ```
 
 Pi loads the TypeScript sources directly via the package manifest. The extension entrypoint is:
+
+- Node.js runtime: uses `better-sqlite3`
+- Bun runtime: uses native `bun:sqlite`
+
+Both runtimes share the same SQL schema through `src/db-adapter.ts`, and `src/limiter.ts` only depends on the injected adapter.
 
 - `./src/index.ts`
 
@@ -99,6 +108,7 @@ When a configured error status is seen, the extension also emits a UI warning no
 - releases the slot on `message_end` for assistant messages
 - uses `agent_end` and `session_shutdown` as safety-net releases
 - uses FIFO queueing through `src/limiter.ts`
+- opens SQLite through a runtime-specific adapter in `src/adapters/`
 - refreshes lease heartbeats while a request is in flight
 - prunes stale waiters/leases from dead or expired processes
 - never injects custom concurrency fields into provider payloads
